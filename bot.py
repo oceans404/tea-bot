@@ -272,6 +272,7 @@ def main():
     application.add_handler(CommandHandler("clear", clear_data))
     application.add_handler(CommandHandler("log", log_data))
     application.add_handler(post_conv_handler)
+    application.add_handler(CommandHandler("post", start_post))
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_random_message))
     application.add_error_handler(error_handler)
     application.run_polling(allowed_updates=Update.ALL_TYPES)
