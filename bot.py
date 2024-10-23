@@ -39,6 +39,12 @@ COMMANDS_MESSAGE = (
     "/app - Check out the Tea App to see all anonymous posts"
 )
 
+def initialize_user_data(context, username):
+    """Initialize user data with conversation_id and nillion_seed."""
+    conversation_id = str(uuid.uuid4())
+    context.user_data['conversation_id'] = conversation_id
+    context.user_data['nillion_seed'] = f"{username}_{conversation_id}"
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the /start command"""
     # Check if this is a private chat
@@ -51,12 +57,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if conversation_id and nillion_seed exist in user data
     if 'conversation_id' not in context.user_data or 'nillion_seed' not in context.user_data:
-        conversation_id = str(uuid.uuid4())
-        context.user_data['conversation_id'] = conversation_id
-        context.user_data['nillion_seed'] = f"{username}_{conversation_id}"
-        welcome_message = f"Hi @{username}! I'm a bot that posts to https://tea-frontend-dusky.vercel.app/. Let's get started!\n\nUse /post to create a new post!"
+        initialize_user_data(context, username)
+        welcome_message = f"Hi @{username}! Let's get started!\n\nUse /post to create a new post!"
     else:
-        conversation_id = context.user_data['conversation_id']
         welcome_message = f"Welcome back @{username}!"
     
     await update.message.reply_text(welcome_message + "\n\n" + COMMANDS_MESSAGE)
@@ -68,8 +71,9 @@ async def start_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     if 'nillion_seed' not in context.user_data:
-        await update.message.reply_text("Please start a new conversation with /start")
-        return ConversationHandler.END
+        user = update.effective_user
+        username = user.username if user.username else f"{user.first_name} {user.last_name}".strip()
+        initialize_user_data(context, username)
     
     await update.message.reply_text("What do you want to post?")
     return TYPING_POST
@@ -163,7 +167,7 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors"""
     logger.error(f"Update {update} caused error {context.error}")
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for normal messages"""
     if update.effective_chat.type != 'private':
         return
@@ -201,6 +205,18 @@ async def open_app(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the /app command"""
     await update.message.reply_text(f"Check out the Tea App: https://tea-frontend-dusky.vercel.app/topic/{topic}")  # Replace with your desired link
 
+async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handler for the /clear command"""
+    # Clear conversation_id and nillion_seed from user data
+    if 'conversation_id' in context.user_data:
+        del context.user_data['conversation_id']
+    if 'nillion_seed' in context.user_data:
+        del context.user_data['nillion_seed']
+    if 'nillion_user_id' in context.user_data:
+        del context.user_data['nillion_user_id']
+
+    await update.message.reply_text(f"Your conversation data has been cleared.")
+
 def main():
     """Start the bot"""
     # Initialize persistence
@@ -232,14 +248,17 @@ def main():
         persistent=True
     )
 
+    logger.info("Starting bot...")
+
+    # Run the start handler on new chats with the bot
+    application.add_handler(MessageHandler(filters.StatusUpdate.CHAT_CREATED, start))
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("app", open_app))
+    application.add_handler(CommandHandler("clear", clear_data))
     application.add_handler(post_conv_handler)
-    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_message))
+    application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_random_message))
     application.add_error_handler(error_handler)
-    
-    logger.info("Starting bot...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
