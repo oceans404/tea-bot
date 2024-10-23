@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 api_endpoint = os.getenv('API_ENDPOINT')
 topic = 3
 
-# conversation states
+# conversation states for posting data
 TYPING_POST = 0
 CONFIRMING_POST = 1
 
@@ -39,15 +39,15 @@ COMMANDS_MESSAGE = (
     "/app - Check out the Tea App to see all anonymous posts"
 )
 
-def initialize_user_data(context, username):
+def initialize_user_data(context, user):
     """Initialize user data with conversation_id and nillion_seed."""
+    username = user.username if user.username else f"{user.first_name} {user.last_name}".strip()
     conversation_id = str(uuid.uuid4())
     context.user_data['conversation_id'] = conversation_id
     context.user_data['nillion_seed'] = f"{username}_{conversation_id}"
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handler for the /start command"""
-    # Check if this is a private chat
     if update.effective_chat.type != 'private':
         await update.message.reply_text("I only work in private chats. Please message me directly.")
         return
@@ -57,7 +57,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Check if conversation_id and nillion_seed exist in user data
     if 'conversation_id' not in context.user_data or 'nillion_seed' not in context.user_data:
-        initialize_user_data(context, username)
+        initialize_user_data(context, update.effective_user)
         welcome_message = f"Hi @{username}! Let's get started!\n\nUse /post to create a new post!"
     else:
         welcome_message = f"Welcome back @{username}!"
@@ -71,9 +71,7 @@ async def start_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return ConversationHandler.END
     
     if 'nillion_seed' not in context.user_data:
-        user = update.effective_user
-        username = user.username if user.username else f"{user.first_name} {user.last_name}".strip()
-        initialize_user_data(context, username)
+        initialize_user_data(context, update.effective_user)
     
     await update.message.reply_text("What do you want to post?")
     return TYPING_POST
@@ -114,13 +112,9 @@ async def handle_post_confirmation(update: Update, context: ContextTypes.DEFAULT
     if query.data == 'confirm_post':
         try_again_message = "Try again with /post!"
         try:
-            # Get the pending post data
-            api_data = context.user_data.get('pending_post')
-            
-            # Prepare the data for the new API request
             api_data = {
-                "nillion_seed": context.user_data['nillion_seed'],  
-                "nillion_secret": api_data['message'], 
+                "nillion_seed": context.user_data['nillion_seed'],
+                "nillion_secret": context.user_data['pending_post']['message'],
                 "secret_name": "confession",
                 "topics": [topic]
             }
@@ -128,22 +122,20 @@ async def handle_post_confirmation(update: Update, context: ContextTypes.DEFAULT
             processing_message = await query.edit_message_text("🛜 Storing your post...")
             
             async with aiohttp.ClientSession() as session:
-                async with session.post(f"{api_endpoint}/api/secret", json=api_data) as response:
-                    if response.status == 200:
-                        api_response = await response.json()
-                        secret_id = api_response.get('secret_id')
-                        store_id = api_response.get('store_id')
-                        await processing_message.edit_text(
-                            f"Your post has been secretly stored in Nillion.\n"
-                            f"Nillion Store ID for the post: {store_id}\n"
-                            f"Check it out on https://tea-frontend-dusky.vercel.app/topic/{topic}"
-                        )
+                api_response = await store_secret_with_api(session, api_endpoint, api_data)
+                if api_response:
+                    await handle_successful_response(processing_message, api_response, topic)
+                else:
+                    # Retry 1x
+                    logger.info("Retrying the API request...")
+                    api_response = await store_secret_with_api(session, api_endpoint, api_data)
+                    if api_response:
+                        await handle_successful_response(processing_message, api_response, topic)
                     else:
-                        logger.error(f"API error: Status {response.status}")
                         await processing_message.edit_text(f"There was an error posting your message. {try_again_message}")
         except Exception as e:
-            logger.error(f"Error calling API: {str(e)}")
-            await processing_message.edit_text(f"There was an error processing your request. {try_again_message}")
+            logger.error(f"An exception occurred: {e}")
+            await processing_message.edit_text(f"There was an error posting your message. {try_again_message}")
     else:
         await query.edit_message_text("Post cancelled.")
     
@@ -172,10 +164,6 @@ async def handle_random_message(update: Update, context: ContextTypes.DEFAULT_TY
     if update.effective_chat.type != 'private':
         return
     
-    if 'nillion_seed' not in context.user_data:
-        await update.message.reply_text("Please start a new conversation with /start")
-        return
-    
     await update.message.reply_text(COMMANDS_MESSAGE)
     
 async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -184,6 +172,8 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
         nillion_user_id = context.user_data['nillion_user_id']
         await update.message.reply_text(f"Your Nillion User ID is: {nillion_user_id}. This ID is used to identify your posts in Nillion.")
         return  
+    else:
+        initialize_user_data(context, update.effective_user)
 
     if 'nillion_seed' in context.user_data:
         nillion_seed = context.user_data['nillion_seed']
@@ -193,7 +183,7 @@ async def info(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     api_response = await response.json()
                     nillion_user_id = api_response.get('nillion_user_id')
                     context.user_data['nillion_user_id'] = nillion_user_id 
-                    await update.message.reply_text(f"Your Nillion User ID is: {nillion_user_id}. This ID is used to identify your posts in Nillion.")
+                    await update.message.reply_text(f"Your new Nillion User ID is: {nillion_user_id}. This ID is used to identify your posts in Nillion.")
                 else:
                     logger.error(f"API error: Status {response.status}")
                     await update.message.reply_text("Sorry, there was an error retrieving your user ID.")
@@ -217,6 +207,29 @@ async def clear_data(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     await update.message.reply_text(f"Your conversation data has been cleared.")
 
+async def log_data(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handler for the /log command"""
+    await update.message.reply_text(f"User data: {context.user_data}")
+
+async def store_secret_with_api(session, api_endpoint, api_data):
+    """Function to make the API request."""
+    async with session.post(f"{api_endpoint}/api/secret", json=api_data) as response:
+        if response.status == 200:
+            api_response = await response.json()
+            return api_response
+        else:
+            logger.error(f"API error: {response}")
+            return None
+
+async def handle_successful_response(processing_message, api_response, topic):
+    """Handle the successful API response."""
+    store_id = api_response.get('store_id')
+    await processing_message.edit_text(
+        f"Your post has been secretly stored in Nillion.\n"
+        f"Nillion Store ID for the post: {store_id}\n"
+        f"Check it out on https://tea-frontend-dusky.vercel.app/topic/{topic}"
+    )
+
 def main():
     """Start the bot"""
     # Initialize persistence
@@ -227,12 +240,13 @@ def main():
         logger.error("No bot token found! Make sure TELEGRAM_BOT_TOKEN is set in .env file")
         return
 
-    # Initialize bot with token and persistence
+    # Initialize app
     application = Application.builder()\
         .token(bot_token)\
         .persistence(persistence)\
         .build()
 
+    # more complex handlerfor /post command
     post_conv_handler = ConversationHandler(
         entry_points=[CommandHandler('post', start_post)],
         states={
@@ -256,6 +270,7 @@ def main():
     application.add_handler(CommandHandler("info", info))
     application.add_handler(CommandHandler("app", open_app))
     application.add_handler(CommandHandler("clear", clear_data))
+    application.add_handler(CommandHandler("log", log_data))
     application.add_handler(post_conv_handler)
     application.add_handler(MessageHandler(filters.TEXT & filters.ChatType.PRIVATE, handle_random_message))
     application.add_error_handler(error_handler)
