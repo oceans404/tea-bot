@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 api_endpoint = os.getenv('API_ENDPOINT')
-topic = 3
+topic = 9
 
 # conversation states for posting data
 TYPING_POST = 0
